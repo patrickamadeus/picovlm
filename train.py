@@ -32,7 +32,9 @@ from utils.train_helper import (
     append_jsonl,
     cast_optimizer_state,
     capture_rng_state,
+    count_batch_tokens,
     colorize_text,
+    create_process_log_path,
     create_run_dir,
     load_training_state,
     estimate_val_loss,
@@ -43,6 +45,7 @@ from utils.train_helper import (
     restore_rng_state,
     save_checkpoint,
     save_plot,
+    should_log_train_outputs,
     tee_run_log,
 )
 
@@ -109,6 +112,36 @@ def build_model_forward_kwargs(batch: dict, device: torch.device):
     }
 
 
+def maybe_log_train_samples(*, raw_model, device, base_dir, sample_log_path, step):
+    was_training = raw_model.training
+    raw_model.eval()
+    try:
+        sample_outputs = generate_fixed_samples(
+            raw_model,
+            device=device,
+            base_dir=base_dir,
+        )
+    finally:
+        raw_model.train(was_training)
+
+    print(colorize_text(f"[samples] step={step}", "magenta", attrs=["bold"]))
+    for sample in sample_outputs:
+        print(colorize_text(f"  [{sample['name']}] {sample['prompt']}", "magenta"))
+        for idx, generation in enumerate(sample["generations"], start=1):
+            print(colorize_text(f"    >> generation {idx}: {generation}", "white"))
+        append_jsonl(
+            sample_log_path,
+            {
+                "kind": "sample",
+                "step": int(step),
+                "name": sample["name"],
+                "image": sample["image"],
+                "prompt": sample["prompt"],
+                "generations": sample["generations"],
+            },
+        )
+
+
 def main():
     init_distributed()
     try:
@@ -116,12 +149,16 @@ def main():
         config_path, cfg = _load_yaml_config(args.config)
         model_cfg = load_vlm_config(cfg)
         train_cfg = load_train_config(cfg)
+        repo_dir = Path(__file__).resolve().parent
         run_dir = create_run_dir(Path(__file__).resolve().parent / "results") if is_master() else None
         plot_path = run_dir / "loss.png" if run_dir is not None else None
         loss_log_path = run_dir / "loss.jsonl" if run_dir is not None else None
         sample_log_path = run_dir / "samples.jsonl" if run_dir is not None else None
-        run_log_ctx = tee_run_log(run_dir / "run.log") if run_dir is not None else contextlib.nullcontext()
+        process_log_path = create_process_log_path(repo_dir, "train") if is_master() else None
+        run_log_ctx = tee_run_log(process_log_path) if process_log_path is not None else contextlib.nullcontext()
         with run_log_ctx:
+            if process_log_path is not None:
+                print(colorize_text(f"[log] file={process_log_path}", "cyan"))
             if run_dir is not None:
                 with open(run_dir / "resolved_config.yml", "w", encoding="utf-8") as f:
                     yaml.safe_dump(
@@ -187,7 +224,7 @@ def main():
                 step_iter = tqdm(step_iter, desc="train", dynamic_ncols=True)
             for step in step_iter:
                 _set_lr(optimizer, step, train_cfg)
-                loss_sum, token_sum = 0.0, 0
+                loss_sum, target_token_sum, seen_token_sum = 0.0, 0, 0
                 for micro_step in range(train_cfg.gradient_accumulation_steps):
                     while True:
                         try:
@@ -204,18 +241,21 @@ def main():
                         logits = raw_model.decoder.head(logits) if not raw_model.decoder.lm_use_tokens else logits
                         labels = batch["labels"].to(device)
                         loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1), ignore_index=-100, reduction="sum")
-                        tokens = int((labels != -100).sum().item())
-                        if tokens == 0:
+                        target_tokens = int((labels != -100).sum().item())
+                        seen_tokens = count_batch_tokens(batch)
+                        if target_tokens == 0:
                             continue
                         loss.backward()
                         loss_sum += float(loss.item())
-                        token_sum += tokens
-                global_token_sum = int(sum_scalar(token_sum, device))
+                        target_token_sum += target_tokens
+                        seen_token_sum += seen_tokens
+                global_target_token_sum = int(sum_scalar(target_token_sum, device))
+                global_seen_token_sum = int(sum_scalar(seen_token_sum, device))
                 global_loss_sum = float(sum_scalar(loss_sum, device))
-                if global_token_sum == 0:
+                if global_target_token_sum == 0:
                     optimizer.zero_grad(set_to_none=True)
                     continue
-                scale = get_world_size() / global_token_sum
+                scale = get_world_size() / global_target_token_sum
                 for param in model.parameters():
                     if param.grad is not None:
                         param.grad.mul_(scale)
@@ -225,10 +265,21 @@ def main():
 
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-                train_loss = global_loss_sum / global_token_sum
-                consumed_tokens += global_token_sum
+                train_loss = global_loss_sum / global_target_token_sum
+                consumed_tokens += global_seen_token_sum
+                should_log_outputs = should_log_train_outputs(
+                    step=step,
+                    stats_log_interval=train_cfg.stats_log_interval,
+                    effective_stop_step=effective_stop_step,
+                )
                 if is_master():
-                    step_iter.set_postfix_str(format_train_postfix(train_loss, consumed_tokens))
+                    step_iter.set_postfix_str(
+                        format_train_postfix(
+                            step=step,
+                            batch_loss=train_loss,
+                            consumed_tokens=consumed_tokens,
+                        )
+                    )
                     train_steps.append(step)
                     train_losses.append(train_loss)
                     append_jsonl(
@@ -237,9 +288,11 @@ def main():
                             "kind": "train",
                             "step": step,
                             "loss": train_loss,
-                            "tokens": global_token_sum,
+                            "batch_loss": train_loss,
+                            "tokens": global_seen_token_sum,
+                            "target_tokens": global_target_token_sum,
                             "consumed_tokens": consumed_tokens,
-                            "log_interval": bool(step == 1 or step % max(1, train_cfg.stats_log_interval) == 0 or step == effective_stop_step),
+                            "log_interval": should_log_outputs,
                         },
                     )
 
@@ -286,34 +339,15 @@ def main():
                         append_jsonl(loss_log_path, {"kind": "checkpoint", "step": step, "repo_id": repo_id})
                     barrier()
                 
-                if is_master() and (step == 1 or step % max(1, train_cfg.stats_log_interval) == 0 or step == effective_stop_step):
+                if is_master() and should_log_outputs:
                     save_plot(plot_path, train_steps, train_losses, val_steps, val_losses)
-                    was_training = raw_model.training
-                    raw_model.eval()
-                    try:
-                        sample_outputs = generate_fixed_samples(
-                            raw_model,
-                            device=device,
-                            base_dir=Path(__file__).resolve().parent,
-                        )
-                    finally:
-                        raw_model.train(was_training)
-                    print(colorize_text(f"[samples] step={step}", "magenta", attrs=["bold"]))
-                    for sample in sample_outputs:
-                        print(colorize_text(f"  [{sample['name']}] {sample['prompt']}", "magenta"))
-                        for idx, generation in enumerate(sample["generations"], start=1):
-                            print(colorize_text(f"    >> generation {idx}: {generation}", "white"))
-                        append_jsonl(
-                            sample_log_path,
-                            {
-                                "kind": "sample",
-                                "step": step,
-                                "name": sample["name"],
-                                "image": sample["image"],
-                                "prompt": sample["prompt"],
-                                "generations": sample["generations"],
-                            },
-                        )
+                    maybe_log_train_samples(
+                        raw_model=raw_model,
+                        device=device,
+                        base_dir=Path(__file__).resolve().parent,
+                        sample_log_path=sample_log_path,
+                        step=step,
+                    )
 
             final_rng_state = capture_rng_state()
             final_rng_state_by_rank = gather_objects(final_rng_state)

@@ -1,0 +1,33 @@
+[project]
+name = "picovlm"
+version = "0.1.0"
+description = "A lightweight NanoVLM-derived vision-language training and evaluation repo."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "datasets",
+  "einops",
+  "huggingface-hub",
+  "matplotlib",
+  "numpy<3",
+  "pillow",
+  "pyyaml",
+  "safetensors",
+  "termcolor",
+  "torch<3",
+  "torchvision",
+  "tqdm",
+  "transformers",
+  "wandb",
+]
+
+[project.optional-dependencies]
+eval = [
+  "lmms-eval",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+lmms-eval = { git = "https://github.com/EvolvingLMMs-Lab/lmms-eval.git" }

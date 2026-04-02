@@ -2,15 +2,24 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 import os
+import tempfile
+from unittest.mock import patch
 
 import torch
 
 from configs.config import TrainConfig, VLMConfig, load_train_config, load_vlm_config
 from models.nanovlm import VisionLanguageModel
-from train import build_model_forward_kwargs, build_optimizer_groups
+from train import build_model_forward_kwargs, build_optimizer_groups, maybe_log_train_samples
 from utils.datasets import VQACollator
 from utils.processor_transforms import get_tokenizer
-from utils.train_helper import _valid_batch
+from utils.train_helper import (
+    _valid_batch,
+    count_batch_tokens,
+    create_process_log_path,
+    format_consumed_tokens,
+    format_train_postfix,
+    should_log_train_outputs,
+)
 
 
 class _FakeTokenizer:
@@ -80,6 +89,65 @@ class TestTrainUtilities(unittest.TestCase):
     def test_valid_batch_no_longer_requires_legacy_split_metadata(self):
         self.assertTrue(_valid_batch({"input_ids": torch.ones(1, 2, dtype=torch.long)}))
         self.assertFalse(_valid_batch({"input_ids": torch.empty(0, 0, dtype=torch.long)}))
+
+    def test_format_consumed_tokens_uses_k_m_b_suffixes(self):
+        self.assertEqual(format_consumed_tokens(999), "999")
+        self.assertEqual(format_consumed_tokens(12_300), "12.3K")
+        self.assertEqual(format_consumed_tokens(4_500_000), "4.5M")
+        self.assertEqual(format_consumed_tokens(6_700_000_000), "6.7B")
+
+    def test_format_train_postfix_includes_step_batch_loss_and_tokens(self):
+        self.assertEqual(
+            format_train_postfix(step=42, batch_loss=1.2345, consumed_tokens=12_300),
+            "step=42 batch_loss=1.23 toks=12.3K",
+        )
+
+    def test_count_batch_tokens_uses_attention_mask_not_supervision_mask(self):
+        batch = {
+            "attention_mask": torch.tensor([[1, 1, 1, 1, 1, 0]], dtype=torch.long),
+            "labels": torch.tensor([[-100, -100, 7, 8, -100, -100]], dtype=torch.long),
+        }
+        self.assertEqual(count_batch_tokens(batch), 5)
+
+    def test_should_log_train_outputs_fires_on_first_interval_and_last_step(self):
+        self.assertTrue(should_log_train_outputs(step=1, stats_log_interval=100, effective_stop_step=250))
+        self.assertTrue(should_log_train_outputs(step=100, stats_log_interval=100, effective_stop_step=250))
+        self.assertTrue(should_log_train_outputs(step=250, stats_log_interval=100, effective_stop_step=250))
+        self.assertFalse(should_log_train_outputs(step=101, stats_log_interval=100, effective_stop_step=250))
+
+    def test_create_process_log_path_writes_under_logs_directory(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = create_process_log_path(Path(tmp_dir), "train", timestamp="20260402_180000")
+            self.assertEqual(log_path, Path(tmp_dir) / "logs" / "train_20260402_180000.log")
+
+    def test_maybe_log_train_samples_uses_fixed_generation_specs(self):
+        sample_log_records = []
+        sample_outputs = [
+            {"name": "image_1", "image": "/repo/assets/cat.png", "prompt": "Describe the image.", "generations": ["cat"]},
+            {"name": "image_2", "image": "/repo/assets/clinic.png", "prompt": "What is the name of the clinic?", "generations": ["clinic"]},
+            {"name": "image_3", "image": "/repo/assets/case.png", "prompt": "relationship", "generations": ["case"]},
+            {"name": "image_4_count", "image": "/repo/assets/soccer.png", "prompt": "How many players are there?", "generations": ["11"]},
+            {"name": "image_4_color", "image": "/repo/assets/soccer.png", "prompt": "What is the color of their shirt?", "generations": ["red"]},
+        ]
+        raw_model = torch.nn.Linear(1, 1)
+        raw_model.train()
+
+        with patch("train.generate_fixed_samples", return_value=sample_outputs) as mock_generate, patch(
+            "train.append_jsonl", side_effect=lambda path, record: sample_log_records.append((path, record))
+        ):
+            maybe_log_train_samples(
+                raw_model=raw_model,
+                device=torch.device("cpu"),
+                base_dir=Path("/repo"),
+                sample_log_path=Path("/repo/results/samples.jsonl"),
+                step=100,
+            )
+
+        mock_generate.assert_called_once()
+        self.assertTrue(raw_model.training)
+        self.assertEqual(len(sample_log_records), 5)
+        self.assertEqual(sample_log_records[0][1]["step"], 100)
+        self.assertEqual(sample_log_records[-1][1]["name"], "image_4_color")
 
     def test_vqa_collator_left_pads_without_last_img_idx(self):
         collator = VQACollator(_FakeTokenizer(), max_length=8)

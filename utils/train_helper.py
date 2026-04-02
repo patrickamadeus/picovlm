@@ -31,6 +31,14 @@ def create_run_dir(base_dir="results", tz_name="Asia/Bangkok"):
     return run_dir
 
 
+def create_process_log_path(base_dir, process_name, *, timestamp=None, tz_name="Asia/Bangkok"):
+    base_dir = Path(base_dir)
+    log_dir = base_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stamp = timestamp or datetime.now(ZoneInfo(tz_name)).strftime("%Y%m%d_%H%M%S")
+    return log_dir / f"{process_name}_{stamp}.log"
+
+
 def append_jsonl(path, record):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,8 +95,26 @@ def format_consumed_tokens(count):
     return f"{count:,}"
 
 
-def format_train_postfix(loss, consumed_tokens):
-    return f"loss={loss:.2f} toks={format_consumed_tokens(consumed_tokens)}"
+def format_train_postfix(*, step, batch_loss, consumed_tokens):
+    return f"step={int(step)} batch_loss={float(batch_loss):.2f} toks={format_consumed_tokens(consumed_tokens)}"
+
+
+def should_log_train_outputs(*, step, stats_log_interval, effective_stop_step):
+    interval = max(1, int(stats_log_interval))
+    step = int(step)
+    return bool(step == 1 or step % interval == 0 or step == int(effective_stop_step))
+
+
+def count_batch_tokens(batch):
+    if batch is None:
+        return 0
+    attention_mask = batch.get("attention_mask")
+    if attention_mask is not None:
+        return int(attention_mask.sum().item())
+    input_ids = batch.get("input_ids")
+    if input_ids is not None:
+        return int(input_ids.numel())
+    return 0
 
 
 def resolve_stop_after_step(train_cfg):

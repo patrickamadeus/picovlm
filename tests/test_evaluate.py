@@ -77,3 +77,41 @@ class TestEvaluateOutputs(unittest.TestCase):
         self.assertEqual(recorded["cli_args"].output_path, "eval_results/coco.json")
         self.assertFalse(recorded["cli_args"].process_with_media)
         self.assertEqual(recorded["model"], "wrapped-model")
+
+    def test_cli_evaluate_wraps_execution_in_logs_file(self):
+        fake_args = SimpleNamespace(
+            config=None,
+            checkpoint="repo-or-path",
+            tasks="coco_cap",
+            batch_size=1,
+            device="cpu",
+            limit=1,
+            num_fewshot=0,
+            output_path=None,
+            gen_kwargs="",
+            write_out=False,
+            log_samples=False,
+            verbosity="INFO",
+        )
+
+        fake_evaluator = types.SimpleNamespace(simple_evaluate=lambda **kwargs: {"results": {"coco_cap": {"Bleu_4": 0.0}}})
+        fake_utils = types.SimpleNamespace(make_table=lambda results: "table")
+        fake_task_manager_module = types.SimpleNamespace(TaskManager=lambda: types.SimpleNamespace(match_tasks=lambda tasks: tasks))
+        fake_lmms_eval = types.SimpleNamespace(evaluator=fake_evaluator, utils=fake_utils)
+
+        with patch.dict(
+            sys.modules,
+            {
+                "lmms_eval": fake_lmms_eval,
+                "lmms_eval.tasks": fake_task_manager_module,
+            },
+        ), patch("evaluate.NanoVLMWrapper", return_value="wrapped-model"), patch(
+            "evaluate.create_process_log_path",
+            return_value=Path("/repo/logs/evaluate_20260402_181500.log"),
+        ) as mock_log_path, patch("evaluate.tee_run_log") as mock_tee, patch("builtins.print"):
+            mock_tee.return_value.__enter__ = lambda self=None: None
+            mock_tee.return_value.__exit__ = lambda exc_type, exc, tb, self=None: False
+            cli_evaluate(fake_args)
+
+        mock_log_path.assert_called_once()
+        mock_tee.assert_called_once_with(Path("/repo/logs/evaluate_20260402_181500.log"))

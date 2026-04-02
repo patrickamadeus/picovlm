@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import yaml
 
 from utils.eval_wrapper import NanoVLMWrapper
+from utils.train_helper import create_process_log_path, tee_run_log
 
 
 def parse_args():
@@ -61,57 +62,61 @@ def _save_outputs(output_path: str | None, results: dict, samples: dict | None):
 
 def cli_evaluate(args=None):
     cfg_args = parse_args() if args is None else args
-    yaml_args = load_yaml_args(getattr(cfg_args, "config", None))
+    repo_dir = Path(__file__).resolve().parent
+    log_path = create_process_log_path(repo_dir, "evaluate")
+    with tee_run_log(log_path):
+        print(f"[log] file={log_path}")
+        yaml_args = load_yaml_args(getattr(cfg_args, "config", None))
 
-    checkpoint = cfg_args.checkpoint or yaml_args.get("checkpoint")
-    tasks = cfg_args.tasks or yaml_args.get("tasks")
-    if not checkpoint or not tasks:
-        raise ValueError("--checkpoint and --tasks are required unless provided by --config")
-    batch_size = int(cfg_args.batch_size or yaml_args.get("batch_size", 8))
-    device = cfg_args.device or yaml_args.get("device", "cuda")
-    limit = cfg_args.limit if cfg_args.limit is not None else yaml_args.get("limit")
-    num_fewshot = cfg_args.num_fewshot if cfg_args.num_fewshot is not None else yaml_args.get("num_fewshot")
-    output_path = cfg_args.output_path or yaml_args.get("output_path")
-    gen_kwargs = cfg_args.gen_kwargs if cfg_args.gen_kwargs is not None else yaml_args.get("gen_kwargs", "")
-    write_out = bool(getattr(cfg_args, "write_out", False) or yaml_args.get("write_out", False))
-    log_samples = bool(cfg_args.log_samples or yaml_args.get("log_samples", False))
-    verbosity = cfg_args.verbosity or yaml_args.get("verbosity", "INFO")
+        checkpoint = cfg_args.checkpoint or yaml_args.get("checkpoint")
+        tasks = cfg_args.tasks or yaml_args.get("tasks")
+        if not checkpoint or not tasks:
+            raise ValueError("--checkpoint and --tasks are required unless provided by --config")
+        batch_size = int(cfg_args.batch_size or yaml_args.get("batch_size", 8))
+        device = cfg_args.device or yaml_args.get("device", "cuda")
+        limit = cfg_args.limit if cfg_args.limit is not None else yaml_args.get("limit")
+        num_fewshot = cfg_args.num_fewshot if cfg_args.num_fewshot is not None else yaml_args.get("num_fewshot")
+        output_path = cfg_args.output_path or yaml_args.get("output_path")
+        gen_kwargs = cfg_args.gen_kwargs if cfg_args.gen_kwargs is not None else yaml_args.get("gen_kwargs", "")
+        write_out = bool(getattr(cfg_args, "write_out", False) or yaml_args.get("write_out", False))
+        log_samples = bool(cfg_args.log_samples or yaml_args.get("log_samples", False))
+        verbosity = cfg_args.verbosity or yaml_args.get("verbosity", "INFO")
 
-    try:
-        from lmms_eval import evaluator, utils
-        from lmms_eval.tasks import TaskManager
-    except ImportError as exc:  # pragma: no cover - runtime dependency
-        raise ImportError("lmms_eval is required to run evaluate.py") from exc
+        try:
+            from lmms_eval import evaluator, utils
+            from lmms_eval.tasks import TaskManager
+        except ImportError as exc:  # pragma: no cover - runtime dependency
+            raise ImportError("lmms_eval is required to run evaluate.py") from exc
 
-    task_manager = TaskManager()
-    task_names = task_manager.match_tasks(tasks.split(","))
-    wrapped_model = NanoVLMWrapper(model=checkpoint, device=device, batch_size=batch_size)
-    cli_args = SimpleNamespace(
-        output_path=output_path,
-        process_with_media=False,
-    )
+        task_manager = TaskManager()
+        task_names = task_manager.match_tasks(tasks.split(","))
+        wrapped_model = NanoVLMWrapper(model=checkpoint, device=device, batch_size=batch_size)
+        cli_args = SimpleNamespace(
+            output_path=output_path,
+            process_with_media=False,
+        )
 
-    results = evaluator.simple_evaluate(
-        model=wrapped_model,
-        model_args="",
-        tasks=task_names,
-        num_fewshot=num_fewshot,
-        batch_size=batch_size,
-        device=device,
-        limit=limit,
-        write_out=write_out,
-        log_samples=log_samples,
-        gen_kwargs=gen_kwargs,
-        task_manager=task_manager,
-        verbosity=verbosity,
-        cli_args=cli_args,
-    )
-    samples = results.pop("samples") if results and log_samples and "samples" in results else None
-    _save_outputs(output_path, results, samples)
+        results = evaluator.simple_evaluate(
+            model=wrapped_model,
+            model_args="",
+            tasks=task_names,
+            num_fewshot=num_fewshot,
+            batch_size=batch_size,
+            device=device,
+            limit=limit,
+            write_out=write_out,
+            log_samples=log_samples,
+            gen_kwargs=gen_kwargs,
+            task_manager=task_manager,
+            verbosity=verbosity,
+            cli_args=cli_args,
+        )
+        samples = results.pop("samples") if results and log_samples and "samples" in results else None
+        _save_outputs(output_path, results, samples)
 
-    if results and "results" in results:
-        print(utils.make_table(results))
-    return results
+        if results and "results" in results:
+            print(utils.make_table(results))
+        return results
 
 
 if __name__ == "__main__":
