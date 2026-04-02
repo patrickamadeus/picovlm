@@ -1,0 +1,36 @@
+vlm:
+  vit_model_type: google/siglip2-base-patch16-512
+  lm_model_type: HuggingFaceTB/SmolLM2-135M-Instruct
+  lm_tokenizer: HuggingFaceTB/SmolLM2-135M-Instruct
+  vlm_checkpoint_path: lusxvr/nanoVLM-230M-8k
+  vlm_load_backbone_weights: true
+
+train:
+  lr_mp: 5.0e-5
+  lr_vision_backbone: 0.0
+  lr_language_backbone: 5.0e-5
+  batch_size: 16
+  gradient_accumulation_steps: 8
+  max_grad_norm: 1.0
+  max_training_steps: 20000
+  warmup_ratio: 0.03
+  precision: fp32
+  do_eval: true
+  eval_interval: 500
+  max_val_batches: 32
+  max_images_per_example: 1
+  max_sample_length: 1024
+  train_dataset_path: patrickamadeus/the_cauldron
+  train_dataset_name:
+    - all
+  train_split: train
+  val_split: validation
+  enable_source_filter: false
+  allowed_dataset_sources:
+    - ocrvqa
+  push_checkpoints_to_hub: false
+  save_training_state_to_hub: false
+  checkpoint_repo_pattern: patrickamadeus/nanovlm-{i}
+  hf_private: false
+  push_final_model_to_hub: false
+  resume_from_vlm_checkpoint: true
