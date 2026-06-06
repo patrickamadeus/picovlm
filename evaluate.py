@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import yaml
 
+from models.stackvlm import StackVLM
 from utils.eval_wrapper import NanoVLMWrapper
 from utils.train_helper import create_process_log_path, tee_run_log
 
@@ -90,7 +91,8 @@ def cli_evaluate(args=None):
 
         task_manager = TaskManager()
         task_names = task_manager.match_tasks(tasks.split(","))
-        wrapped_model = NanoVLMWrapper(model=checkpoint, device=device, batch_size=batch_size)
+        model = StackVLM.from_pretrained(checkpoint)
+        wrapped_model = NanoVLMWrapper(model=model, device=device, batch_size=batch_size)
         cli_args = SimpleNamespace(
             output_path=output_path,
             process_with_media=False,

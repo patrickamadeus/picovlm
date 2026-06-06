@@ -60,6 +60,7 @@ class TrainConfig:
     lr_mp: float = 5e-5
     lr_vision_backbone: float = 0.0
     lr_language_backbone: float = 5e-5
+    lr_full_decoder: float = 5e-5
 
     batch_size: int = 16
     gradient_accumulation_steps: int = 8

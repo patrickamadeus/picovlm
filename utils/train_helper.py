@@ -232,7 +232,10 @@ def estimate_val_loss(model, loader, device, max_batches=32):
             attention_mask=batch["attention_mask"].to(device),
             targets=None,
         )
-        logits = raw_model.decoder.head(logits) if not raw_model.decoder.lm_use_tokens else logits
+        if hasattr(raw_model, "output_logits"):
+            logits = raw_model.output_logits(logits)
+        else:
+            logits = raw_model.decoder.head(logits) if not raw_model.decoder.lm_use_tokens else logits
         labels = batch["labels"].to(device)
         loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1), ignore_index=-100, reduction="sum")
         total_loss += float(loss.item())

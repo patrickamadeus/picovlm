@@ -4,7 +4,7 @@ from pathlib import Path
 import torch
 import yaml
 
-from models.nanovlm import VisionLanguageModel
+from models.stackvlm import StackVLM
 from utils.generation_helper import build_generation_inputs
 from utils.train_helper import create_process_log_path, tee_run_log
 
@@ -68,7 +68,7 @@ def main():
         greedy = bool(args.greedy or yaml_cfg.get("greedy", False))
 
         device = pick_device()
-        model = VisionLanguageModel.from_pretrained(checkpoint).to(device)
+        model = StackVLM.from_pretrained(checkpoint).to(device)
         model.eval()
 
         tokenizer, input_ids, attention_mask, images = build_generation_inputs(model, image_path, prompt, device)

@@ -9,7 +9,7 @@ import yaml
 from tqdm import tqdm
 
 from configs.config import TrainConfig, load_train_config, load_vlm_config
-from models.nanovlm import VisionLanguageModel
+from models.stackvlm import StackVLM
 from utils.datasets import build_dataloaders
 from utils.distributed import (
     barrier,
@@ -69,21 +69,24 @@ def _apply_freeze_flags(model, train_cfg):
         (model.vision_encoder, train_cfg.lr_vision_backbone <= 0),
         (model.MP, train_cfg.lr_mp <= 0),
         (model.decoder, train_cfg.lr_language_backbone <= 0),
+        (getattr(model, "full_decoder", None), getattr(train_cfg, "lr_full_decoder", train_cfg.lr_language_backbone) <= 0),
     )
     for module, freeze in modules:
+        if module is None:
+            continue
         for param in module.parameters():
             param.requires_grad = not freeze
 
 
 def initialize_model_for_training(model_cfg, train_cfg, *, device: torch.device, train_dtype: torch.dtype):
     if train_cfg.resume_checkpoint_path:
-        model = VisionLanguageModel.from_pretrained(train_cfg.resume_checkpoint_path)
+        model = StackVLM.from_pretrained(train_cfg.resume_checkpoint_path)
     elif train_cfg.resume_from_vlm_checkpoint:
         if not model_cfg.vlm_checkpoint_path:
             raise ValueError("resume_from_vlm_checkpoint=True requires vlm.vlm_checkpoint_path")
-        model = VisionLanguageModel.from_pretrained(model_cfg.vlm_checkpoint_path)
+        model = StackVLM.from_pretrained(model_cfg.vlm_checkpoint_path)
     else:
-        model = VisionLanguageModel(model_cfg, load_backbone=model_cfg.vlm_load_backbone_weights)
+        model = StackVLM(model_cfg, load_backbone=model_cfg.vlm_load_backbone_weights)
     _apply_freeze_flags(model, train_cfg)
     return model.to(device=device, dtype=train_dtype)
 
@@ -94,7 +97,10 @@ def build_optimizer_groups(model, train_cfg):
         ("mp", model.MP, train_cfg.lr_mp),
         ("vision", model.vision_encoder, train_cfg.lr_vision_backbone),
         ("decoder", model.decoder, train_cfg.lr_language_backbone),
+        ("full_decoder", getattr(model, "full_decoder", None), getattr(train_cfg, "lr_full_decoder", train_cfg.lr_language_backbone)),
     ):
+        if module is None:
+            continue
         params = [param for param in module.parameters() if param.requires_grad]
         if params and lr > 0:
             groups.append({"params": params, "lr": lr, "max_lr": lr, "name": name})
@@ -110,6 +116,12 @@ def build_model_forward_kwargs(batch: dict, device: torch.device):
         "attention_mask": batch["attention_mask"].to(device),
         "targets": None,
     }
+
+
+def project_output_logits(raw_model, hidden_states):
+    if hasattr(raw_model, "output_logits"):
+        return raw_model.output_logits(hidden_states)
+    return raw_model.decoder.head(hidden_states) if not raw_model.decoder.lm_use_tokens else hidden_states
 
 
 def maybe_log_train_samples(*, raw_model, device, base_dir, sample_log_path, step):
@@ -238,7 +250,7 @@ def main():
                     sync_context = model.no_sync if is_distributed() and micro_step < train_cfg.gradient_accumulation_steps - 1 else contextlib.nullcontext
                     with sync_context():
                         logits, _ = model(**build_model_forward_kwargs(batch, device))
-                        logits = raw_model.decoder.head(logits) if not raw_model.decoder.lm_use_tokens else logits
+                        logits = project_output_logits(raw_model, logits)
                         labels = batch["labels"].to(device)
                         loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1), ignore_index=-100, reduction="sum")
                         target_tokens = int((labels != -100).sum().item())
